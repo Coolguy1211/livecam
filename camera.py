@@ -4,33 +4,26 @@ import numpy as np
 import os
 import threading
 import time
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 class Camera:
-    def __init__(self, url, camera_id=0):
+    def __init__(self, url, net, output_layers, classes, config, camera_id=0):
         self.url = url
         self.camera_id = camera_id
         self.is_running = False
         self.thread = None
         self.output_frame = None
         self.lock = threading.Lock()
+        self.net = net
+        self.output_layers = output_layers
+        self.classes = classes
+        self.config = config
 
-        # --- Load YOLO model ---
-        yolo_dir = "yolo"
-        yolo_config = os.path.join(yolo_dir, "yolov3.cfg")
-        yolo_weights = os.path.join(yolo_dir, "yolov3.weights")
-        yolo_classes_file = os.path.join(yolo_dir, "coco.names")
-
-        print(f"[INFO] Camera {self.camera_id}: Loading YOLO from disk...")
-        self.net = cv2.dnn.readNetFromDarknet(yolo_config, yolo_weights)
-
-        with open(yolo_classes_file, 'r') as f:
-            self.classes = [line.strip() for line in f.readlines()]
-
-        layer_names = self.net.getLayerNames()
-        try:
-            self.output_layers = [layer_names[i[0] - 1] for i in self.net.getUnconnectedOutLayers()]
-        except IndexError:
-            self.output_layers = [layer_names[i - 1] for i in self.net.getUnconnectedOutLayers()]
+        # --- Notification Settings ---
+        self.last_notification_time = 0
+        self.notification_cooldown = 30  # seconds
 
     def start(self):
         """Starts the camera thread."""
@@ -113,30 +106,60 @@ class Camera:
                 cv2.putText(frame, text, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
                 # --- Notification Logic ---
-                # Check if a person is detected and log it
+                # Check if a person is detected and trigger a notification
                 if self.classes[classIDs[i]] == "person":
-                    self._log_notification("Person detected")
+                    self._trigger_notification("Person detected")
 
         return frame
 
-    def _log_notification(self, message):
-        """Logs a notification message to a file, with a cooldown."""
-        log_file = "notifications.log"
-        cooldown = 30  # seconds
-
-        # Check if we need to initialize the last_log_time
-        if not hasattr(self, 'last_log_time'):
-            self.last_log_time = 0
-
+    def _trigger_notification(self, message):
+        """Triggers all configured notification methods, with a cooldown."""
         current_time = time.time()
-        if (current_time - self.last_log_time) > cooldown:
-            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            log_message = f"[{timestamp}] [Camera {self.camera_id}] {message}\n"
+        if (current_time - self.last_notification_time) > self.notification_cooldown:
+            self.last_notification_time = current_time
 
-            with open(log_file, "a") as f:
-                f.write(log_message)
+            # Log to file
+            self._log_to_file(message)
 
-            self.last_log_time = current_time
+            # Send email
+            if self.config.getboolean('EMAIL', 'enable'):
+                self._send_email_notification(message)
+
+    def _log_to_file(self, message):
+        """Logs a notification message to a file."""
+        log_file = "notifications.log"
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        log_message = f"[{timestamp}] [Camera {self.camera_id}] {message}\n"
+        with open(log_file, "a") as f:
+            f.write(log_message)
+
+    def _send_email_notification(self, message):
+        """Sends an email notification."""
+        try:
+            smtp_server = self.config['EMAIL']['smtp_server']
+            smtp_port = self.config.getint('EMAIL', 'smtp_port')
+            smtp_username = self.config['EMAIL']['smtp_username']
+            smtp_password = self.config['EMAIL']['smtp_password']
+            recipient_email = self.config['EMAIL']['recipient_email']
+
+            msg = MIMEMultipart()
+            msg['From'] = smtp_username
+            msg['To'] = recipient_email
+            msg['Subject'] = f"Person Detected on Camera {self.camera_id}"
+
+            body = f"A person was detected on camera {self.camera_id} at {time.strftime('%Y-%m-%d %H:%M:%S')}."
+            msg.attach(MIMEText(body, 'plain'))
+
+            server = smtplib.SMTP(smtp_server, smtp_port)
+            server.starttls()
+            server.login(smtp_username, smtp_password)
+            text = msg.as_string()
+            server.sendmail(smtp_username, recipient_email, text)
+            server.quit()
+            print(f"[INFO] Camera {self.camera_id}: Email notification sent to {recipient_email}")
+
+        except Exception as e:
+            print(f"[ERROR] Camera {self.camera_id}: Failed to send email notification: {e}")
 
     def get_frame(self):
         """Returns the latest processed frame."""
