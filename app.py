@@ -2,23 +2,50 @@ from flask import Flask, Response, render_template
 from camera import Camera
 import time
 import threading
+import os
+import cv2
+import configparser
 
 # --- Configuration ---
-# List of camera stream URLs
-# TODO: Replace with your actual camera URLs
-CAMERA_URLS = [
-    "http://192.168.1.10:8080/video",
-    # "http://192.168.1.11:8080/video",
-]
+config = configparser.ConfigParser()
+config.read('config.ini')
+
+CAMERA_URLS = config['DEFAULT']['camera_urls'].split(',')
+YOLO_CONFIG = config['DEFAULT']['yolo_config']
+YOLO_WEIGHTS = config['DEFAULT']['yolo_weights']
+YOLO_CLASSES = config['DEFAULT']['yolo_classes']
+
 
 # --- Global Variables ---
 cameras = []
 app = Flask(__name__)
+net = None
+output_layers = None
+classes = None
+
+def load_yolo_model():
+    """Loads the YOLO model from disk."""
+    global net, output_layers, classes
+    print("[INFO] Loading YOLO from disk...")
+    net = cv2.dnn.readNetFromDarknet(YOLO_CONFIG, YOLO_WEIGHTS)
+
+    with open(YOLO_CLASSES, 'r') as f:
+        classes = [line.strip() for line in f.readlines()]
+
+    layer_names = net.getLayerNames()
+    try:
+        output_layers = [layer_names[i[0] - 1] for i in net.getUnconnectedOutLayers()]
+    except IndexError:
+        output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
 
 def start_cameras():
     """Initializes and starts all camera threads."""
+    global net, output_layers, classes, config
+    if net is None:
+        load_yolo_model()
+
     for i, url in enumerate(CAMERA_URLS):
-        camera = Camera(url, camera_id=i)
+        camera = Camera(url, net, output_layers, classes, config, camera_id=i)
         cameras.append(camera)
         camera.start()
     print(f"[INFO] Started {len(cameras)} camera threads.")
