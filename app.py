@@ -38,6 +38,31 @@ def load_yolo_model():
     except IndexError:
         output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
 
+# --- Camera Initialization ---
+ANDROID_IP_WEBCAM_ENDPOINTS = ['/video', '/video.mjpeg']
+CUSTOM_ENDPOINTS = config.get('IP_CAMERA', 'custom_endpoints', fallback='').split(',')
+CUSTOM_ENDPOINTS = [endpoint.strip() for endpoint in CUSTOM_ENDPOINTS if endpoint.strip()]
+ALL_ENDPOINTS = ANDROID_IP_WEBCAM_ENDPOINTS + CUSTOM_ENDPOINTS
+
+def find_video_stream_url(base_url):
+    """Tries to find a valid video stream URL by checking common endpoints."""
+    # First, check if the provided URL is already a valid stream
+    cap = cv2.VideoCapture(base_url)
+    if cap.isOpened():
+        cap.release()
+        return base_url
+
+    # If not, check all defined endpoints
+    for endpoint in ALL_ENDPOINTS:
+        url = base_url.rstrip('/') + endpoint
+        cap = cv2.VideoCapture(url)
+        if cap.isOpened():
+            cap.release()
+            print(f"[INFO] Found valid video stream at: {url}")
+            return url
+
+    return None
+
 def start_cameras():
     """Initializes and starts all camera threads."""
     global net, output_layers, classes, config
@@ -45,9 +70,14 @@ def start_cameras():
         load_yolo_model()
 
     for i, url in enumerate(CAMERA_URLS):
-        camera = Camera(url, net, output_layers, classes, config, camera_id=i)
-        cameras.append(camera)
-        camera.start()
+        video_url = find_video_stream_url(url)
+        if video_url:
+            camera = Camera(video_url, net, output_layers, classes, config, camera_id=i)
+            cameras.append(camera)
+            camera.start()
+        else:
+            print(f"[ERROR] Could not find a valid video stream for URL: {url}")
+
     print(f"[INFO] Started {len(cameras)} camera threads.")
 
 @app.route("/")

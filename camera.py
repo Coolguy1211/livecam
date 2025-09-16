@@ -15,6 +15,7 @@ class Camera:
         self.is_running = False
         self.thread = None
         self.output_frame = None
+        self.raw_frame = None
         self.lock = threading.Lock()
         self.net = net
         self.output_layers = output_layers
@@ -24,6 +25,13 @@ class Camera:
         # --- Notification Settings ---
         self.last_notification_time = 0
         self.notification_cooldown = 30  # seconds
+
+        # --- Recording Settings ---
+        self.recording_thread = None
+        self.is_recording = False
+        self.recording_enabled = self.config.getboolean('RECORDING', 'enable', fallback=False)
+        self.recording_dir = self.config.get('RECORDING', 'output_dir', fallback='recordings/')
+        self.recording_chunk_length = self.config.getint('RECORDING', 'chunk_length_seconds', fallback=600)
 
     def start(self):
         """Starts the camera thread."""
@@ -37,12 +45,75 @@ class Camera:
         self.thread.start()
         print(f"[INFO] Camera {self.camera_id}: Thread started.")
 
+        if self.recording_enabled:
+            self._start_recording()
+
     def stop(self):
         """Stops the camera thread."""
         self.is_running = False
         if self.thread is not None:
             self.thread.join()
         print(f"[INFO] Camera {self.camera_id}: Thread stopped.")
+
+        if self.is_recording:
+            self._stop_recording()
+
+    def _start_recording(self):
+        """Starts the recording thread."""
+        if self.is_recording:
+            print(f"[WARNING] Camera {self.camera_id}: Recording thread already running.")
+            return
+
+        self.is_recording = True
+        self.recording_thread = threading.Thread(target=self._recording_loop, args=())
+        self.recording_thread.daemon = True
+        self.recording_thread.start()
+        print(f"[INFO] Camera {self.camera_id}: Recording thread started.")
+
+    def _stop_recording(self):
+        """Stops the recording thread."""
+        self.is_recording = False
+        if self.recording_thread is not None:
+            self.recording_thread.join()
+        print(f"[INFO] Camera {self.camera_id}: Recording thread stopped.")
+
+    def _recording_loop(self):
+        """The main loop for the recording thread."""
+        # Create the output directory if it doesn't exist
+        os.makedirs(self.recording_dir, exist_ok=True)
+
+        while self.is_recording:
+            # Generate a unique filename for the video chunk
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            filename = f"cam{self.camera_id}-{timestamp}.avi"
+            filepath = os.path.join(self.recording_dir, filename)
+
+            # Get frame dimensions
+            with self.lock:
+                if self.raw_frame is None:
+                    time.sleep(0.1)
+                    continue
+                (h, w) = self.raw_frame.shape[:2]
+
+            # Define the codec and create VideoWriter object
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+            writer = cv2.VideoWriter(filepath, fourcc, 20.0, (w, h))
+            print(f"[INFO] Camera {self.camera_id}: Started writing to {filepath}")
+
+            start_time = time.time()
+            while (time.time() - start_time) < self.recording_chunk_length:
+                if not self.is_recording:
+                    break
+
+                with self.lock:
+                    if self.raw_frame is not None:
+                        writer.write(self.raw_frame)
+
+                # Write at ~20 FPS
+                time.sleep(0.05)
+
+            writer.release()
+            print(f"[INFO] Camera {self.camera_id}: Finished writing to {filepath}")
 
     def _run(self):
         """The main loop for the camera thread."""
@@ -62,6 +133,10 @@ class Camera:
                 continue
 
             frame = imutils.resize(frame, width=800)
+
+            with self.lock:
+                self.raw_frame = frame.copy()
+
             processed_frame = self._process_frame(frame)
 
             with self.lock:
